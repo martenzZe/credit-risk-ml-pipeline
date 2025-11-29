@@ -20,9 +20,10 @@ def create_temporal_features(data: pd.DataFrame) -> pd.DataFrame:
     - Payment amount trends and volatility
     - Payment-to-bill ratios
     - Delinquency patterns and streaks
+    - Limit balance
     
     Args:
-        data: DataFrame with BILL_AMT, PAY_AMT, and PAY_ columns
+        data: DataFrame with BILL_AMT, PAY_AMT, and PAY_ columns, and LIMIT_BAL
         
     Returns:
         DataFrame with temporal features added
@@ -30,6 +31,7 @@ def create_temporal_features(data: pd.DataFrame) -> pd.DataFrame:
     data = data.copy()
     
     # Extract column groups
+    limit_bal_col = ['LIMIT_BAL']
     bill_cols = [f'BILL_AMT{i}' for i in range(1, 7)]
     pay_amt_cols = [f'PAY_AMT{i}' for i in range(1, 7)]
     pay_status_cols = ['PAY_0', 'PAY_2', 'PAY_3', 'PAY_4', 'PAY_5', 'PAY_6']
@@ -37,21 +39,36 @@ def create_temporal_features(data: pd.DataFrame) -> pd.DataFrame:
     bills = data[bill_cols]
     pays = data[pay_amt_cols]
     pay_status = data[pay_status_cols]
+    limit_balance = data[limit_bal_col]
     
     # 1. Trend statistics (slopes and volatility)
     bill_deltas = bills.diff(axis=1).fillna(0)
     pay_deltas = pays.diff(axis=1).fillna(0)
+    limit_bal_deltas = limit_balance.diff(axis=1).fillna(0)
     
     data['bill_slope'] = bill_deltas.mean(axis=1)
     data['bill_volatility'] = bills.std(axis=1)
     data['pay_slope'] = pay_deltas.mean(axis=1)
     data['pay_volatility'] = pays.std(axis=1)
+    data['limit_bal_slope'] = limit_bal_deltas.mean(axis=1)
+    data['limit_bal_volatility'] = limit_balance.std(axis=1)
+    data['limit_bal_growth'] = limit_balance.diff(axis=1).fillna(0).mean(axis=1)
     
     # 2. Payment-to-bill ratios
     pay_to_bill = (pays / bills.replace(0, np.nan)).clip(0, 5).fillna(0)
     data['pay_to_bill_mean'] = pay_to_bill.mean(axis=1)
     data['pay_to_bill_min'] = pay_to_bill.min(axis=1)
     data['pay_to_bill_last'] = pay_to_bill.iloc[:, -1]
+
+    # 2b. Ratio of bill and payment features to limit balance
+    # These features show how much of their limit people use or repay
+    for col in bill_cols:
+        data[f'{col}_to_limit'] = data[col] / data['LIMIT_BAL']
+    for col in pay_amt_cols:
+        data[f'{col}_to_limit'] = data[col] / data['LIMIT_BAL']
+
+    data['bill_mean_to_limit'] = data[[f'{col}_to_limit' for col in bill_cols]].mean(axis=1)
+    data['pay_mean_to_limit'] = data[[f'{col}_to_limit' for col in pay_amt_cols]].mean(axis=1)
     
     # 3. Delinquency flags and counts
     late_flags = (pay_status > 0).astype(int)
@@ -123,16 +140,17 @@ def select_features(
 ) -> pd.DataFrame:
     """
     Select features for modeling.
-    
+
     Based on EDA:
     - Use temporal features (highly predictive)
-    - Include LIMIT_BAL and AGE
+    - Include LIMIT_BAL
+    - Include AGE
     - Optionally include raw BILL/PAY features (but they're highly correlated)
-    
+
     Args:
         data: DataFrame with all features
         include_raw_features: Whether to include raw monthly BILL/PAY features
-        
+
     Returns:
         DataFrame with selected features only
     """
@@ -143,19 +161,24 @@ def select_features(
         'late_streak', 'severe_streak',
         'bill_growth', 'pay_growth'
     ]
-    
+
+    # Ensure LIMIT_BAL is included as a core feature
     base_features = ['LIMIT_BAL', 'AGE', 'SEX', 'EDUCATION', 'MARRIAGE']
     
     selected_features = base_features + temporal_features
-    
+
     # Optionally include raw payment features
     if include_raw_features:
         raw_pay_features = ['PAY_0', 'PAY_2', 'PAY_3', 'PAY_4', 'PAY_5', 'PAY_6']
         selected_features.extend(raw_pay_features)
-    
-    # Only select features that exist in the data
+
+    # Only select features that exist in the data (including LIMIT_BAL if present)
     available_features = [f for f in selected_features if f in data.columns]
-    
+
+    # Check that LIMIT_BAL is present in available_features
+    if 'LIMIT_BAL' not in available_features:
+        raise KeyError("LIMIT_BAL must be present in the dataset for modeling.")
+
     return data[available_features]
 
 
